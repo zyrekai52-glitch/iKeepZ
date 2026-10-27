@@ -1,0 +1,63 @@
+'use strict';
+
+// Self-contained flat config (no extra packages needed): correctness rules only.
+const nodeGlobals = {
+  require: 'readonly',
+  module: 'writable',
+  exports: 'writable',
+  process: 'readonly',
+  Buffer: 'readonly',
+  console: 'readonly',
+  setTimeout: 'readonly',
+  clearTimeout: 'readonly',
+  setInterval: 'readonly',
+  clearInterval: 'readonly',
+  setImmediate: 'readonly',
+  queueMicrotask: 'readonly',
+  structuredClone: 'readonly',
+  URL: 'readonly',
+  URLSearchParams: 'readonly',
+  AbortController: 'readonly',
+  TextEncoder: 'readonly',
+  TextDecoder: 'readonly',
+  fetch: 'readonly',
+  globalThis: 'readonly',
+  __dirname: 'readonly',
+  __filename: 'readonly',
+};
+
+module.exports = [
+  { ignores: ['node_modules/**'] },
+  {
+    files: ['**/*.js'],
+    languageOptions: {
+      ecmaVersion: 2023,
+      sourceType: 'commonjs',
+      globals: nodeGlobals,
+    },
+    rules: {
+      'no-undef': 'error',
+      'no-unused-vars': ['error', { args: 'after-used', argsIgnorePattern: '^_', varsIgnorePattern: '^_', caughtErrors: 'none' }],
+      'no-unreachable': 'error',
+      'no-dupe-keys': 'error',
+      'no-dupe-args': 'error',
+      'no-duplicate-case': 'error',
+      'no-const-assign': 'error',
+      'no-redeclare': 'error',
+      'no-self-assign': 'error',
+      'no-unsafe-finally': 'error',
+      'no-unsafe-negation': 'error',
+      'no-cond-assign': 'error',
+      'no-constant-condition': ['error', { checkLoops: false }],
+      'no-empty': ['error', { allowEmptyCatch: true }],
+      'no-fallthrough': 'error',
+      'no-this-before-super': 'error',
+      'no-var': 'error',
+      'prefer-const': 'error',
+      'use-isnan': 'error',
+      'valid-typeof': 'error',
+      'require-await': 'off',
+      eqeqeq: ['error', 'always', { null: 'ignore' }],
+    },
+  },
+];
