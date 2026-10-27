@@ -1,0 +1,15 @@
+iKeepZ - Proprietary Software Notice
+
+Copyright (c) 2026 iKeepZ. All rights reserved.
+
+This source code, and the applications built from it, are proprietary. No licence is
+granted to copy, modify, distribute, sublicense, sell or otherwise use them, except with
+the prior written permission of the copyright holder.
+
+This notice is a placeholder chosen because the project brief did not name a licence.
+The repository owner may replace this file with any licence they prefer (for example MIT
+or Apache-2.0) before publishing the repository.
+
+Third-party components are licensed under their own terms; see docs/DEPENDENCIES.md.
+The bundled JetBrains Mono typeface is licensed under the SIL Open Font License 1.1
+(see assets/fonts/OFL.txt).

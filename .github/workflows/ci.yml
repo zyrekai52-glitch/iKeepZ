@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Any 3.47 patch release on the stable channel (the source was written against 3.47.8).
+  FLUTTER_VERSION: "3.47.x"
+  FIREBASE_TOOLS: "firebase-tools@15"
+
+jobs:
+  backend:
+    name: Backend lint and unit tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend/functions
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+      - name: Lint
+        run: npm run lint
+      - name: Unit tests
+        run: npm test
+      - name: Keep the generated lock file
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: functions-package-lock
+          path: backend/functions/package-lock.json
+          if-no-files-found: ignore
+          retention-days: 14
+
+  rules:
+    name: Firestore and Storage rules (emulator)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Install rules test dependencies
+        working-directory: backend/rules-tests
+        run: npm install --no-audit --no-fund
+      - name: Run rules tests against the emulators
+        working-directory: backend
+        run: npx --yes "$FIREBASE_TOOLS" emulators:exec --only firestore,storage --project demo-ikeepz "npm --prefix rules-tests test"
+
+  flutter:
+    name: Flutter analyze and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Flutter version
+        run: flutter --version
+      - name: Resolve dependencies
+        run: flutter pub get
+      - name: Keep the generated pubspec.lock
+        uses: actions/upload-artifact@v7
+        with:
+          name: pubspec-lock
+          path: pubspec.lock
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Analyze
+        shell: bash
+        run: flutter analyze --no-fatal-infos 2>&1 | tee analyze.log
+      - name: Annotate analyzer output
+        if: always()
+        run: python3 scripts/analyze_annotations.py analyze.log
+      - name: Unit and widget tests
+        run: flutter test --reporter expanded

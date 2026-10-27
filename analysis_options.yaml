@@ -1,0 +1,24 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+    - windows/**
+    - backend/**
+    - .dart_tool/**
+  language:
+    strict-casts: false
+  errors:
+    # Deprecations are reported as infos so Flutter upgrades do not break the build.
+    deprecated_member_use: info
+
+linter:
+  rules:
+    avoid_print: true
+    prefer_const_constructors: true
+    prefer_const_declarations: true
+    prefer_final_locals: true
+    always_declare_return_types: true
+    unawaited_futures: true
+    use_build_context_synchronously: true

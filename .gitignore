@@ -1,0 +1,53 @@
+# ---- Flutter / Dart ----
+.dart_tool/
+.packages
+.pub-cache/
+.pub/
+/build/
+.flutter-plugins
+.flutter-plugins-dependencies
+.flutter-versions
+coverage/
+*.iml
+.idea/
+.vscode/
+*.swp
+# pubspec.lock is intentionally NOT ignored: this is an application, commit the lock file CI uploads as an artifact.
+
+# ---- Local configuration and secrets: NEVER commit ----
+/config/app_config.json
+.env
+.env.*
+*.env
+!.env.example
+!**/.env.example
+.runtimeconfig.json
+service-account*.json
+*-adminsdk-*.json
+serviceAccount*.json
+google-services.json
+GoogleService-Info.plist
+.firebaserc
+*.keystore
+*.jks
+key.properties
+
+# ---- Build and release outputs ----
+/release/
+*.apk
+*.aab
+*.msix
+
+# ---- Backend ----
+node_modules/
+.firebase/
+firebase-debug.log
+firebase-debug.*.log
+firestore-debug.log
+ui-debug.log
+pubspec.lock.bak
+
+# ---- OS / editor noise ----
+.DS_Store
+Thumbs.db
+*.log

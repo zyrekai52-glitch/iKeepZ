@@ -1,0 +1,84 @@
+name: Deploy backend
+
+# Manual workflow: deploys Cloud Functions, Firestore rules/indexes, Storage rules and the payment-return page.
+# Requires the GitHub secrets listed in docs/CI_AND_RELEASES.md (FIREBASE_SERVICE_ACCOUNT, FIREBASE_PROJECT_ID, PAYMONGO_*).
+
+on:
+  workflow_dispatch:
+    inputs:
+      what:
+        description: "What to deploy"
+        type: choice
+        options:
+          - everything
+          - functions-only
+          - rules-and-indexes-only
+        default: everything
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-backend
+  cancel-in-progress: false
+
+env:
+  FIREBASE_TOOLS: "firebase-tools@15"
+
+jobs:
+  deploy:
+    name: Test and deploy
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Check required secrets
+        env:
+          SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "${FIREBASE_PROJECT_ID:-}" ]; then echo "::error::The FIREBASE_PROJECT_ID secret is empty."; exit 1; fi
+          if [ -z "${SERVICE_ACCOUNT:-}" ]; then echo "::error::The FIREBASE_SERVICE_ACCOUNT secret is empty."; exit 1; fi
+      - name: Install function dependencies
+        working-directory: backend/functions
+        run: npm install --no-audit --no-fund
+      - name: Lint and test before deploying
+        working-directory: backend/functions
+        run: |
+          npm run lint
+          npm test
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      - name: Store function secrets in Secret Manager
+        if: inputs.what != 'rules-and-indexes-only'
+        working-directory: backend
+        env:
+          PAYMONGO_SECRET_KEY: ${{ secrets.PAYMONGO_SECRET_KEY }}
+          PAYMONGO_WEBHOOK_SECRET: ${{ secrets.PAYMONGO_WEBHOOK_SECRET }}
+        run: |
+          set -euo pipefail
+          for NAME in PAYMONGO_SECRET_KEY PAYMONGO_WEBHOOK_SECRET; do
+            VALUE="${!NAME:-}"
+            if [ -z "$VALUE" ]; then
+              echo "::warning title=$NAME is empty::Skipping it. Card/e-wallet deposits stay disabled until it is set."
+              continue
+            fi
+            printf '%s' "$VALUE" | npx --yes "$FIREBASE_TOOLS" functions:secrets:set "$NAME" --data-file - --project "$FIREBASE_PROJECT_ID" --non-interactive
+          done
+      - name: Deploy
+        working-directory: backend
+        run: |
+          set -euo pipefail
+          case "${{ inputs.what }}" in
+            functions-only) ONLY="functions" ;;
+            rules-and-indexes-only) ONLY="firestore,storage" ;;
+            *) ONLY="functions,firestore,storage,hosting" ;;
+          esac
+          echo "Deploying: $ONLY"
+          npx --yes "$FIREBASE_TOOLS" deploy --only "$ONLY" --project "$FIREBASE_PROJECT_ID" --non-interactive --force

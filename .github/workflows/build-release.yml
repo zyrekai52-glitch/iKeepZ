@@ -1,0 +1,206 @@
+name: Build release
+
+# Builds the real Android APKs (one per ABI plus a universal one) and the Windows release, then,
+# when a version tag such as v1.0.0 is pushed, publishes them as a GitHub Release.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      allow_unconfigured:
+        description: "Build even if the Firebase secrets are missing (the app will show a 'Configuration required' screen)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  FLUTTER_VERSION: "3.47.x"
+
+jobs:
+  android:
+    name: Android APKs (arm64-v8a, armeabi-v7a, x86_64, universal)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      signing: ${{ steps.signing.outputs.mode }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Write app configuration
+        env:
+          ALLOW_UNCONFIGURED: ${{ inputs.allow_unconfigured }}
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_APP_ID_ANDROID: ${{ secrets.FIREBASE_APP_ID_ANDROID }}
+          FIREBASE_APP_ID_WINDOWS: ${{ secrets.FIREBASE_APP_ID_WINDOWS }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          PRIVACY_URL: ${{ secrets.PRIVACY_URL }}
+          RELEASES_URL: ${{ secrets.RELEASES_URL }}
+        run: python3 scripts/write_app_config.py android
+      - name: Prepare signing
+        id: signing
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] && [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] && [ -n "${ANDROID_KEY_ALIAS:-}" ]; then
+            printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > android/app/upload-keystore.jks
+            {
+              printf 'storePassword=%s\n' "$ANDROID_KEYSTORE_PASSWORD"
+              printf 'keyPassword=%s\n' "${ANDROID_KEY_PASSWORD:-$ANDROID_KEYSTORE_PASSWORD}"
+              printf 'keyAlias=%s\n' "$ANDROID_KEY_ALIAS"
+              printf 'storeFile=upload-keystore.jks\n'
+            } > android/key.properties
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "Signing with the configured release keystore."
+          else
+            echo "mode=debug" >> "$GITHUB_OUTPUT"
+            echo "::warning title=Debug-signed APKs::The ANDROID_* signing secrets are not set, so the APKs are signed with the Android debug key. They install and run, but are not suitable for publishing. See docs/CI_AND_RELEASES.md."
+          fi
+      - name: Build the four APKs
+        run: bash scripts/build_android.sh
+      - name: Verify the APKs
+        run: bash scripts/verify_apks.sh
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Android build"
+            echo ""
+            echo "Signing: **${{ steps.signing.outputs.mode }}**"
+            echo ""
+            if [ -f release/SHA256SUMS.txt ]; then
+              echo '```'
+              cat release/SHA256SUMS.txt
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Upload APKs
+        uses: actions/upload-artifact@v7
+        with:
+          name: iKeepZ-android
+          path: |
+            release/iKeepZ-arm64-v8a.apk
+            release/iKeepZ-armeabi-v7a.apk
+            release/iKeepZ-x86_64.apk
+            release/iKeepZ-universal.apk
+            release/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  windows:
+    name: Windows EXE
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Write app configuration
+        shell: bash
+        env:
+          ALLOW_UNCONFIGURED: ${{ inputs.allow_unconfigured }}
+          FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+          FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+          FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+          FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+          FIREBASE_APP_ID_ANDROID: ${{ secrets.FIREBASE_APP_ID_ANDROID }}
+          FIREBASE_APP_ID_WINDOWS: ${{ secrets.FIREBASE_APP_ID_WINDOWS }}
+          FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+          API_BASE_URL: ${{ secrets.API_BASE_URL }}
+          SUPPORT_EMAIL: ${{ secrets.SUPPORT_EMAIL }}
+          PRIVACY_URL: ${{ secrets.PRIVACY_URL }}
+          RELEASES_URL: ${{ secrets.RELEASES_URL }}
+        run: python scripts/write_app_config.py windows
+      - name: Build the Windows release
+        shell: pwsh
+        run: ./scripts/build_windows.ps1
+      - name: Verify the Windows build
+        shell: pwsh
+        run: |
+          $dir = "release/iKeepZ-windows-x64"
+          $required = @("iKeepZ.exe", "flutter_windows.dll", "data/app.so", "data/icudtl.dat", "data/flutter_assets/AssetManifest.bin", "vcruntime140.dll", "msvcp140.dll")
+          $missing = @()
+          foreach ($item in $required) {
+            if (-not (Test-Path (Join-Path $dir $item))) { $missing += $item }
+          }
+          if ($missing.Count -gt 0) { throw "Missing from the Windows build: $($missing -join ', ')" }
+          $exe = Get-Item (Join-Path $dir "iKeepZ.exe")
+          $info = $exe.VersionInfo
+          "iKeepZ.exe: $($exe.Length) bytes, ProductName='$($info.ProductName)', FileVersion='$($info.FileVersion)'"
+          if ($info.ProductName -ne "iKeepZ") { throw "Unexpected ProductName '$($info.ProductName)'" }
+          Get-Content release/SHA256SUMS-windows.txt
+          "### Windows build`n`n$(Get-Content release/SHA256SUMS-windows.txt -Raw)" | Out-File -FilePath $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+      - name: Upload Windows build
+        uses: actions/upload-artifact@v7
+        with:
+          name: iKeepZ-windows
+          path: |
+            release/iKeepZ-windows-x64.zip
+            release/SHA256SUMS-windows.txt
+          if-no-files-found: error
+          retention-days: 30
+
+  release:
+    name: Publish GitHub Release
+    needs: [android, windows]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Combine checksums
+        run: |
+          cd dist
+          cat SHA256SUMS.txt SHA256SUMS-windows.txt > SHA256SUMS-all.txt
+          rm SHA256SUMS.txt SHA256SUMS-windows.txt
+          ls -l
+      - name: Create the release
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            dist/iKeepZ-arm64-v8a.apk
+            dist/iKeepZ-armeabi-v7a.apk
+            dist/iKeepZ-x86_64.apk
+            dist/iKeepZ-universal.apk
+            dist/iKeepZ-windows-x64.zip
+            dist/SHA256SUMS-all.txt
+          fail_on_unmatched_files: true
+          generate_release_notes: true
+          prerelease: ${{ needs.android.outputs.signing != 'release' }}
+          body: |
+            ## Installing
+            - **Android:** install `iKeepZ-arm64-v8a.apk` on almost all phones made since 2017. Use `iKeepZ-armeabi-v7a.apk` for older 32-bit phones, `iKeepZ-x86_64.apk` for emulators / Chromebooks, or `iKeepZ-universal.apk` if you are unsure (larger file).
+            - **Windows:** unzip `iKeepZ-windows-x64.zip` and run `iKeepZ.exe` (keep the folder together).
+            - Verify downloads against `SHA256SUMS-all.txt`.
+
+            Android signing for this release: **${{ needs.android.outputs.signing }}** (`debug` means the APKs are test builds signed with the Android debug key).

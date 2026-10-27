@@ -1,0 +1,42 @@
+{
+  "_comment": "Shared by backend/functions tests (Node) and test/money_test.dart (Dart). Amounts are integer minor units.",
+  "currencies": { "PHP": 2, "USD": 2, "JPY": 0, "KWD": 3 },
+  "parse": [
+    { "currency": "PHP", "input": "1,234.50", "minor": 123450 },
+    { "currency": "PHP", "input": "1234", "minor": 123400 },
+    { "currency": "PHP", "input": "0.05", "minor": 5 },
+    { "currency": "PHP", "input": ".5", "minor": 50 },
+    { "currency": "PHP", "input": "  12.30 ", "minor": 1230 },
+    { "currency": "PHP", "input": "0", "minor": 0 },
+    { "currency": "USD", "input": "99.99", "minor": 9999 },
+    { "currency": "JPY", "input": "1,500", "minor": 1500 },
+    { "currency": "KWD", "input": "1.234", "minor": 1234 },
+    { "currency": "PHP", "input": "12.345", "error": "too_many_decimals" },
+    { "currency": "JPY", "input": "1.5", "error": "too_many_decimals" },
+    { "currency": "PHP", "input": "abc", "error": "invalid" },
+    { "currency": "PHP", "input": "1.2.3", "error": "invalid" },
+    { "currency": "PHP", "input": "", "error": "empty" },
+    { "currency": "PHP", "input": "   ", "error": "empty" },
+    { "currency": "PHP", "input": "-5", "error": "negative" },
+    { "currency": "PHP", "input": "99999999999999999", "error": "too_large" }
+  ],
+  "format": [
+    { "currency": "PHP", "minor": 123450, "plain": "1234.50" },
+    { "currency": "PHP", "minor": 5, "plain": "0.05" },
+    { "currency": "PHP", "minor": 0, "plain": "0.00" },
+    { "currency": "PHP", "minor": -250, "plain": "-2.50" },
+    { "currency": "JPY", "minor": 1500, "plain": "1500" },
+    { "currency": "KWD", "minor": 1234, "plain": "1.234" },
+    { "currency": "USD", "minor": 100, "plain": "1.00" }
+  ],
+  "fee": [
+    { "amountMinor": 100000, "bps": 250, "fixedMinor": 0, "feeMinor": 2500 },
+    { "amountMinor": 10001, "bps": 250, "fixedMinor": 0, "feeMinor": 250 },
+    { "amountMinor": 10010, "bps": 250, "fixedMinor": 0, "feeMinor": 250 },
+    { "amountMinor": 10020, "bps": 250, "fixedMinor": 0, "feeMinor": 251 },
+    { "amountMinor": 10000, "bps": 0, "fixedMinor": 2500, "feeMinor": 2500 },
+    { "amountMinor": 10000, "bps": 100, "fixedMinor": 500, "feeMinor": 600 },
+    { "amountMinor": 1, "bps": 5000, "fixedMinor": 0, "feeMinor": 1 },
+    { "amountMinor": 0, "bps": 250, "fixedMinor": 0, "feeMinor": 0 }
+  ]
+}

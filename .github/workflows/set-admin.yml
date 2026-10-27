@@ -1,0 +1,57 @@
+name: Grant or revoke admin
+
+# Manual workflow: sets (or removes) the `admin` custom claim on an existing iKeepZ account, which unlocks the
+# withdrawal-review queue. The account must already exist (register in the app first). The person must sign out
+# and back in (or wait up to an hour) for the new claim to reach their app.
+
+on:
+  workflow_dispatch:
+    inputs:
+      email:
+        description: "Email of the existing account"
+        type: string
+        required: true
+      action:
+        description: "Grant or revoke"
+        type: choice
+        options:
+          - grant
+          - revoke
+        default: grant
+
+permissions:
+  contents: read
+
+jobs:
+  set-admin:
+    name: Update admin claim
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Check required secrets
+        env:
+          SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+          PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+        run: |
+          if [ -z "${PROJECT_ID:-}" ] || [ -z "${SERVICE_ACCOUNT:-}" ]; then
+            echo "::error::FIREBASE_PROJECT_ID and FIREBASE_SERVICE_ACCOUNT must be set as GitHub secrets."
+            exit 1
+          fi
+      - name: Install dependencies
+        working-directory: backend/functions
+        run: npm install --no-audit --no-fund
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v3
+        with:
+          credentials_json: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+      - name: Update the claim
+        working-directory: backend/functions
+        env:
+          GCLOUD_PROJECT: ${{ secrets.FIREBASE_PROJECT_ID }}
+          TARGET_EMAIL: ${{ inputs.email }}
+          ACTION: ${{ inputs.action }}
+        run: node scripts/set-admin.js "$TARGET_EMAIL" "$ACTION"
