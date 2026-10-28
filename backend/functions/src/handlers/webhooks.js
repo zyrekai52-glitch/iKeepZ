@@ -12,7 +12,7 @@ const { settleDepositFromProvider } = require('./deposits');
 async function handleWebhook(deps, { rawBody, headers }) {
   const { provider, store, clock, config, logger } = deps;
   if (!provider || !provider.isConfigured()) throw err('not_configured', 'Payments are not configured.');
-  if (!rawBody || !provider.verifyWebhook(rawBody, headers || {})) {
+  if (!rawBody || rawBody.length === 0 || !provider.verifyWebhook(rawBody, headers || {})) {
     throw err('unauthenticated', 'The webhook signature is not valid.');
   }
   let body;
@@ -35,6 +35,11 @@ async function handleWebhook(deps, { rawBody, headers }) {
     } else {
       const result = await settleDepositFromProvider(deps, found.docs[0].id, 'provider');
       settled = result.data.status;
+      if (settled === 'pending') {
+        // The provider does not (yet) report this payment as paid. Do not mark the event as handled: answering with an
+        // error asks the provider to deliver it again, and the scheduled reconciliation picks it up in any case.
+        throw err('conflict', 'The payment is not confirmed at the provider yet.', { retry: true });
+      }
     }
   }
 

@@ -15,6 +15,14 @@ const { securityStatus, changePin, revokeSessions } = require('./handlers/securi
 const { paymongoWebhook } = require('./handlers/webhooks');
 const { listWithdrawals, withdrawalAction, reverseTransaction, reconcile } = require('./handlers/admin');
 
+/**
+ * Firestore gives up with ABORTED (gRPC code 10) after its own internal retries when too many requests touch the same
+ * documents at once. Nothing was committed in that case, so the honest answer is "busy, try again" rather than a 500.
+ */
+function isContention(error) {
+  return Boolean(error) && (error.code === 10 || error.code === 'aborted' || /\bABORTED\b/.test(String(error.message)));
+}
+
 // auth: 'none' | 'user' | 'admin';  verified: the caller's email must be verified.
 const ROUTES = [
   ['GET', '/health', { auth: 'none' }, health],
@@ -74,6 +82,11 @@ function createApi(deps) {
       return { status: 200, body: { data } };
     } catch (error) {
       if (isApiError(error)) return { status: error.status, body: error.toBody() };
+      if (isContention(error)) {
+        deps.logger.warn('Transaction contention', { message: error.message });
+        const busy = err('conflict', 'This account is busy with another request. Please try again.', { retry: true });
+        return { status: busy.status, body: busy.toBody() };
+      }
       deps.logger.error('Unhandled error', { message: error && error.message, stack: error && error.stack });
       return { status: 500, body: { error: { code: 'internal', message: 'Something went wrong. Please try again.' } } };
     }

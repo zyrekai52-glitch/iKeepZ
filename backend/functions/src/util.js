@@ -87,7 +87,6 @@ function sanitizeText(value, max) {
   if (typeof value !== 'string') return '';
   const cleaned = value
     .normalize('NFC')
-    // eslint-disable-next-line no-control-regex
     .replace(/[\u0000-\u001F\u007F-\u009F]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();

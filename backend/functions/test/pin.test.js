@@ -16,7 +16,7 @@ test('weak PINs are recognised', () => {
 
 test('setting a PIN: validation, step-up and storage', async () => {
   const h = createHarness();
-  const user = await h.signup('u1');
+  await h.signup('u1');
   const status = async () => ok(await h.call('GET', '/security/status', { token: h.auth.issue('u1') }));
   assert.equal((await status()).pinSet, false);
   assert.equal((await status()).emailVerified, true);
@@ -39,7 +39,6 @@ test('setting a PIN: validation, step-up and storage', async () => {
   assert.equal(stored.lockedUntil, null);
   assert.ok(!JSON.stringify(stored).includes('135790'), 'the PIN itself is never stored');
   assert.equal((await status()).pinSet, true);
-  void user;
 });
 
 test('the same PIN hashes differently each time (random salt)', async () => {
