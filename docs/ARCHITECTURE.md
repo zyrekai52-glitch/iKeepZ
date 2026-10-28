@@ -16,7 +16,8 @@ Flutter app (Android + Windows)
 Cloud Functions (Node 22, CommonJS, firebase-functions v2 API)
    ├─ api            HTTPS router, all endpoints below
    ├─ paymongoWebhook  public webhook (HMAC-verified), same code path as POST /webhooks/paymongo
-   └─ reconcilePendingDeposits   scheduled (every 15 min)
+   ├─ reconcilePendingDeposits   scheduled (every 15 min): settles/expires deposits whose webhook never arrived
+   └─ cleanupExpired             scheduled (daily): deletes expired rate-limit / idempotency / webhook-dedupe / daily-limit documents
 ```
 
 Principles
@@ -71,6 +72,7 @@ Plain params (functions `.env` / `defineString`, all optional with defaults):
 | `TRANSFER_FEE_BPS` `TRANSFER_FEE_FIXED_MINOR` | `0` `0` | fee deducted from the sender in addition to the amount |
 | `PIN_MAX_ATTEMPTS` / `PIN_LOCK_MINUTES` | `5` / `15` | |
 | `REQUIRE_KYC_FOR_WITHDRAWAL` | `false` | when true, `users/{uid}.kycStatus` must be `approved` |
+| `PAYMENT_METHODS` | `gcash,paymaya,card` | PayMongo `payment_method_types` offered at checkout |
 
 Fee rounding: `fee = round_half_up(amount * bps / 10000) + fixed` computed with BigInt.
 Function region constant: `asia-southeast1` (edit in `functions/src/config.js`).
@@ -98,23 +100,25 @@ users/{uid}/activity/{id}           (append-only; client creates source:'client'
 users/{uid}/notifications/{id}      (server creates; client may update ONLY readAt, may delete)
   type, group('wallet'|'security'), title, body, data(map), readAt|null, createdAt
 users/{uid}/destinations/{id}       (server-written, owner read)
-  kind('bank'|'ewallet'), providerName(<=40), accountName(<=80), accountNumberMasked('••••1234'), status('active'|'removed'), createdAt
+  kind('bank'|'ewallet'), providerName(<=40), accountName(<=80), accountNumberMasked('••••1234'), status('active'|'removed'), createdAt, removedAt (when removed)
 wallets/{uid}                       (server-written, owner read)
   currency, availableMinor, heldMinor, pendingDepositMinor, walletCode, status('active'|'frozen'), version, createdAt, updatedAt
 wallets/{uid}/ledger/{entryId}      (server-written, immutable, owner read)
   txId, type('deposit_credit'|'withdrawal_hold'|'withdrawal_release'|'withdrawal_settle'|'transfer_out'|'transfer_in'|'reversal_debit'|'reversal_credit'),
-  deltaAvailableMinor, deltaHeldMinor, balanceAvailableAfterMinor, balanceHeldAfterMinor, currency, createdAt
+  deltaAvailableMinor, deltaHeldMinor, balanceAvailableAfterMinor, balanceHeldAfterMinor, currency, seq (== wallet.version after the change), createdAt
+  (an entry exists only when available or held changed: a pending deposit changes `pendingDepositMinor` only and writes no entry)
 walletTx/{txId}                     (txId == reference; server-written; read if request.auth.uid in participants)
   reference, kind('deposit'|'withdrawal'|'transfer'|'reversal'), status, amountMinor, feeMinor, totalMinor, currency,
   ownerUid, counterpartyUid|null, participants[uid], directions{uid:'credit'|'debit'},
   ownerDisplay, counterpartyDisplay|null (masked names like "Juan D."),
   destinationId|null, destinationSummary|null ("GCash ••••1234"), provider|null, providerRef|null, checkoutUrl|null (pending deposits only),
   note|null, failureReason|null, payoutReference|null, reversesTxId|null, reversedByTxId|null,
+  providerPaymentId|null (set when a deposit is credited), dailyKey|null (internal: which `walletDaily` document a withdrawal/transfer counted against; never sent by the API),
   createdAt, updatedAt, completedAt|null
 walletTx/{txId}/events/{id}         (server-written; participants may read)  from, to, at, by('system'|'user'|'admin'|'provider'), note
 ```
 Server-only collections (rules: `allow read, write: if false` for clients):
-`walletSecurity/{uid}` (PIN hash `scrypt`, salt, failedAttempts, lockedUntil, updatedAt),
+`walletSecurity/{uid}` (PIN hash `scrypt`, salt, scrypt params, failedAttempts, lockedUntil, lockCount, setAt, updatedAt),
 `destinationSecrets/{destId}` (ownerUid, full accountNumber), `walletCodes/{code}` → `{uid}`,
 `idempotency/{sha256(uid|op|key)}` (uid, op, requestHash, txId, createdAt), `rateLimits/{key}`,
 `walletDaily/{uid_YYYYMMDD}` (outMinor), `providerEvents/{providerEventId}` (webhook dedupe),
@@ -143,9 +147,9 @@ Success: HTTP 200 `{ "data": … }`. Error: `{ "error": { "code": "<snake_case>"
 |---|---|
 | 400 | `invalid_argument` |
 | 401 | `unauthenticated` |
-| 403 | `permission_denied`, `email_not_verified`, `account_suspended`, `feature_disabled`, `pin_required`, `step_up_required`, `kyc_required` |
+| 403 | `permission_denied`, `email_not_verified`, `account_suspended`, `feature_disabled`, `pin_required`, `pin_incorrect` (details.attemptsRemaining), `step_up_required`, `kyc_required` |
 | 404 | `not_found` |
-| 409 | `conflict`, `idempotency_conflict`, `insufficient_funds`, `limit_exceeded`, `invalid_state` |
+| 409 | `conflict` (also: the account is busy with another request, `details.retry: true`; or a deposit is still being set up), `idempotency_conflict`, `insufficient_funds`, `limit_exceeded` (`details.reason`: `below_min`, `above_max`, `daily_limit`, `wallet_limit`, `max_destinations`), `invalid_state` |
 | 423 | `pin_locked` (details.lockedUntil ISO) |
 | 429 | `resource_exhausted` |
 | 502 | `provider_error` |
@@ -159,7 +163,7 @@ Dates in API responses are ISO-8601 UTC strings. Transactions are returned in th
 |---|---|---|
 | `GET /health` | none | `{ok, version, time, capabilities:{deposits, withdrawals, transfers, provider|null, walletCurrencies[], limits{depositMin,depositMax,withdrawMin,withdrawMax,transferMin,transferMax,dailyOut}, fees{deposit{bps,fixedMinor},withdrawal{…},transfer{…}}, requireKyc}}` — `deposits` is true only when provider secrets **and** `PUBLIC_RETURN_URL` are configured |
 | `POST /bootstrap` | user | `{displayName?, currency?}` → `{user, wallet}`; idempotent; creates user, wallet (currency fixed at creation, must be in `WALLET_CURRENCIES`), walletCode, default categories, first activity entry |
-| `POST /wallet/quote` | user, verified | `{kind:'deposit'|'withdrawal'|'transfer', amountMinor}` → `{amountMinor, feeMinor, totalMinor, currency, minMinor, maxMinor, remainingDailyMinor|null}` (deposit: `totalMinor` = what the user pays at checkout; withdrawal/transfer: `totalMinor` = debited from wallet) |
+| `POST /wallet/quote` | user, verified | `{kind:'deposit'|'withdrawal'|'transfer', amountMinor}` → `{amountMinor, feeMinor, totalMinor, currency, minMinor, maxMinor, remainingDailyMinor|null, problem|null}` (deposit: `totalMinor` = what the user pays at checkout; withdrawal/transfer: `totalMinor` = debited from wallet). `problem` is informational (`below_min`, `above_max`, `daily_limit`, `insufficient_funds`, `unavailable`) so the UI can explain inline; the real operations re-validate everything |
 | `POST /wallet/deposits` | user, verified | `{amountMinor, idempotencyKey}` → `{tx, checkoutUrl}` — creates `pending` tx, increments `pendingDepositMinor`, creates provider checkout session for `totalMinor` |
 | `POST /wallet/deposits/{id}/sync` | owner | → `{tx}` — fetches the session from the provider; credits if paid & matching; marks failed/expired otherwise |
 | `POST /wallet/deposits/{id}/cancel` | owner | → `{tx}` — only while `pending` and provider reports no payment |
@@ -172,19 +176,22 @@ Dates in API responses are ISO-8601 UTC strings. Transactions are returned in th
 | `GET /security/status` | user | → `{pinSet, pinLockedUntil|null, emailVerified, authTime}` |
 | `POST /security/pin` | user, verified, step-up (`auth_time` ≤ 5 min) | `{newPin, currentPin?}` (currentPin required if a PIN exists) → `{ok:true}`; PIN = exactly 6 digits |
 | `POST /security/revoke-sessions` | user | → `{ok:true}` (revokes refresh tokens) |
-| `POST /webhooks/paymongo` | signature | PayMongo event → `{received:true}` always 200 after signature check (even for duplicates/unknown events) |
+| `POST /webhooks/paymongo` | signature | PayMongo event → 200 `{received:true, settled:<status>|null}`; a redelivered event id → 200 `{received:true, duplicate:true}`; unknown/other events → 200 and ignored. Bad or missing signature → 401. Malformed body → 400. Provider unreachable → 502 and a paid event the provider does not (yet) confirm → 409 `conflict`: both leave the event unrecorded so the provider redelivers it |
 | `GET /admin/withdrawals?status=&limit=` | admin | → `{items:[{tx, userEmail, destination:{kind,providerName,accountName,accountNumber}}]}` |
 | `POST /admin/withdrawals/{id}/approve` | admin | → `{tx}` |
 | `POST /admin/withdrawals/{id}/reject` | admin | `{reason}` → `{tx}` (releases hold) |
 | `POST /admin/withdrawals/{id}/complete` | admin | `{payoutReference}` → `{tx}` (settles held funds) |
 | `POST /admin/withdrawals/{id}/fail` | admin | `{reason}` → `{tx}` (releases hold) |
 | `POST /admin/transactions/{id}/reverse` | admin | `{reason}` → `{tx}` (deposit/transfer only; fails with `insufficient_funds` if the credited party already spent it) |
-| `GET /admin/reconcile` | admin | → `{walletsChecked, mismatches:[{uid, field, expected, actual}], platformRevenue:{CUR:n}}` |
+| `GET /admin/reconcile?after=&limit=` | admin | → `{walletsChecked, mismatches:[{uid, field, expected, actual}], platformRevenue:{CUR:n}, next:<wallet id>|null}` — pages of ≤ 500 wallets; pass `after=<next>` for the following page |
 
 Admin = custom claim `admin: true` (set with `backend/scripts/set-admin.js` or the `set-admin` GitHub workflow). Every admin action writes `adminAudit/{id}`.
 
 Rate limits (fixed window per uid, stored in `rateLimits`): lookups 20/10 min, deposits 10/h, withdrawals 5/h, transfers 20/h,
 destinations 10/day, PIN set/change 5/h, quote 60/h. PIN verification failures: 5 → locked 15 min.
+Ordering rules (tested): an idempotent replay is answered first, before PIN verification and before rate limiting; for PIN-gated operations
+(withdrawal, transfer) the bucket is consumed only **after** the PIN was accepted, so wrong guesses are limited by the PIN lock itself
+and cannot be used to exhaust someone's allowance; a bad wallet code (unknown/own/unusable) is rejected before the PIN is checked.
 
 Idempotency: `idempotencyKey` is 16–64 chars `[A-Za-z0-9_-]`. Same key + same payload ⇒ the original result is returned
 (no second debit/credit). Same key + different payload ⇒ `409 idempotency_conflict`.
@@ -192,17 +199,29 @@ The client keeps the key in secure storage until it has the response, so an app 
 
 Notifications (server-created, respect `preferences.notifications.wallet`; security ones always sent):
 `deposit_completed`, `deposit_failed`, `withdrawal_requested`, `withdrawal_approved`, `withdrawal_rejected`,
-`withdrawal_completed`, `withdrawal_failed`, `transfer_sent`, `transfer_received`, `pin_changed`, `sessions_revoked`.
+`withdrawal_completed`, `withdrawal_failed`, `withdrawal_cancelled`, `transfer_sent`, `transfer_received`, `transaction_reversed`,
+`pin_changed`, `pin_locked`, `sessions_revoked` (the last three are in the always-on `security` group).
 `data` always contains `txId` when applicable.
 
 ## 5. Provider integration (PayMongo, pluggable)
-`functions/src/providers/index.js` exposes `{name, isConfigured(), createCheckout({txId, reference, amountMinor, currency, description, email, returnUrl}), fetchPayment(providerRef), verifyWebhook(rawBody, headers), parseWebhook(body)}`.
+`functions/src/providers/index.js` returns the configured provider, which exposes
+`{name, isConfigured(), createCheckout({reference, amountMinor, currency, description, returnUrl}) → {providerRef, checkoutUrl, expiresAt},
+fetchPayment(providerRef) → {status:'paid'|'unpaid'|'expired', amountMinor, currency, referenceNumber, providerPaymentId, paidAt},
+expireCheckout(providerRef), verifyWebhook(rawBody, headers) → boolean, parseWebhook(body) → {eventId, type, rawType, checkoutSessionId, referenceNumber, livemode}}`.
+The secret value `unset` (what the deploy workflow stores when a secret has not been provided) means "not configured".
+
 PayMongo adapter: Checkout Sessions (`POST https://api.paymongo.com/v1/checkout_sessions`, HTTP Basic with the secret key),
-`GET /v1/checkout_sessions/{id}` for verification, webhook header `Paymongo-Signature: t=…,te=…,li=…`
-(HMAC-SHA256 hex of `"{t}.{rawBody}"` with the webhook secret; `li` for live-mode events, `te` for test-mode; timing-safe compare).
-Webhook handling: verify signature → dedupe on event id → extract checkout-session id → **re-fetch the session from PayMongo** →
-require paid + amount == `totalMinor` + currency match → credit in a transaction guarded by `status == 'pending'`.
-Real money movement still requires the owner’s PayMongo merchant approval; with test keys only test payments occur.
+`GET /v1/checkout_sessions/{id}` for verification, `POST …/expire` to close an abandoned session, webhook header
+`Paymongo-Signature: t=…,te=…,li=…` (HMAC-SHA256 hex of `"{t}.{rawBody}"` with the webhook secret; `li` for live-mode events,
+`te` for test-mode; timing-safe compare). Only the event `checkout_session.payment.paid` triggers a settle attempt.
+**The adapter was written from PayMongo's published API description and is exercised in tests against a stubbed PayMongo API with
+genuine HMAC signatures; it has not been run against PayMongo's servers.** The first sandbox payment with test keys is the real check.
+
+Webhook handling: verify signature → dedupe on event id → find the deposit by checkout-session id → **re-fetch the session from PayMongo** →
+require paid + amount == `totalMinor` + currency match (+ reference match when reported) → credit in a transaction guarded by
+`status ∈ {pending, expired, cancelled}` (a late payment on a deposit that was closed locally is still credited: the customer really paid).
+A mismatch fails the deposit, credits nothing and writes an `adminAudit` entry. The same function settles deposits from `/sync` and the scheduler.
+Real money movement still requires the owner's PayMongo merchant approval; with test keys only test payments occur.
 Withdrawals are **not** auto-paid: they require admin approval and the admin marks them completed after paying out manually or via a payout
 provider integration that the owner must add (documented, not simulated).
 
@@ -227,9 +246,15 @@ load and the first auth-state event are all complete — never on a timer.
 Responsive: width ≥ 900 → permanent sidebar; 600–899 → collapsed rail; < 600 → bottom navigation (5 primary) + drawer for the rest.
 
 ## 7. Security rules summary
-Firestore: default deny. Owner-only access to everything under `users/{uid}` with field/type/size validation on writes;
-`wallets`, `walletTx`, ledger, destinations: owner/participant read-only; server-only collections fully denied.
-Storage: only `users/{uid}/avatar/*`, owner read/write, `image/(jpeg|png|webp)`, < 2 MiB.
+Firestore (`backend/firestore.rules`): default deny. Owner-only access under `users/{uid}`; the profile document is created by the backend and
+the owner may change only `displayName`, `photoUrl` (a Firebase Storage URL or null), `preferences` (full, enum-validated map) and `updatedAt`;
+records and categories are owner CRUD with field/type/size validation and server timestamps (`createdAt` immutable); `activity` is append-only
+(`source: 'client'` only); `notifications` can only be marked read once or deleted; `destinations`, `wallets`, `ledger` are owner read-only;
+`walletTx` and its `events` are readable by participants only (queries must filter `participants array-contains uid`) and never writable;
+server-only collections are fully denied. Rules cannot loop over lists, so the 30-character limit per tag is enforced by the client only
+(the list is capped at 10 entries by the rules).
+Storage (`backend/storage.rules`): only `users/{uid}/avatar/avatar.(jpg|png|webp)`, owner read/write/delete, `image/(jpeg|png|webp)`, 0 < size < 2 MiB.
+The rules are covered by `backend/rules-tests` (emulator, run in CI) and `parity.test.js` keeps the icon/accent/theme/locale lists identical to the client.
 
 ## 8. Testing strategy
 * Backend: `node --test` with an in-memory Firestore fake (transaction/retry semantics) — ledger invariants, idempotency, concurrency

@@ -90,7 +90,7 @@ exports.reconcilePendingDeposits = onSchedule(
 
 /** Daily housekeeping of expired rate-limit / idempotency / webhook-dedupe / daily-limit documents. */
 exports.cleanupExpired = onSchedule(
-  { schedule: 'every day 03:30', timeZone: 'Asia/Manila', timeoutSeconds: 300, memory: '256MiB', retryCount: 0 },
+  { schedule: 'every day 03:30', timeZone: 'Asia/Manila', secrets, timeoutSeconds: 300, memory: '256MiB', retryCount: 0 },
   async () => {
     const summary = await cleanupExpired(getRuntime().deps);
     logger.info('cleanupExpired finished', summary);

@@ -63,13 +63,19 @@ jobs:
           PAYMONGO_WEBHOOK_SECRET: ${{ secrets.PAYMONGO_WEBHOOK_SECRET }}
         run: |
           set -euo pipefail
+          # The functions declare both secrets, so both must exist in Secret Manager for a deployment to succeed.
+          # A GitHub secret that is empty is stored as the literal "unset", which the backend treats as "not configured"
+          # (card/e-wallet deposits stay switched off). A value that is already stored is never overwritten with it.
           for NAME in PAYMONGO_SECRET_KEY PAYMONGO_WEBHOOK_SECRET; do
             VALUE="${!NAME:-}"
-            if [ -z "$VALUE" ]; then
-              echo "::warning title=$NAME is empty::Skipping it. Card/e-wallet deposits stay disabled until it is set."
-              continue
+            if [ -n "$VALUE" ]; then
+              printf '%s' "$VALUE" | npx --yes "$FIREBASE_TOOLS" functions:secrets:set "$NAME" --data-file - --project "$FIREBASE_PROJECT_ID" --non-interactive
+            elif npx --yes "$FIREBASE_TOOLS" functions:secrets:get "$NAME" --project "$FIREBASE_PROJECT_ID" --non-interactive > /dev/null 2>&1; then
+              echo "::notice title=$NAME::The GitHub secret is empty; keeping the value already stored in Secret Manager."
+            else
+              echo "::warning title=$NAME is not set::Storing the placeholder 'unset'. Card and e-wallet deposits stay disabled until you add the real value and deploy again."
+              printf 'unset' | npx --yes "$FIREBASE_TOOLS" functions:secrets:set "$NAME" --data-file - --project "$FIREBASE_PROJECT_ID" --non-interactive
             fi
-            printf '%s' "$VALUE" | npx --yes "$FIREBASE_TOOLS" functions:secrets:set "$NAME" --data-file - --project "$FIREBASE_PROJECT_ID" --non-interactive
           done
       - name: Deploy
         working-directory: backend

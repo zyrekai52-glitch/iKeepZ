@@ -1,0 +1,22 @@
+rules_version = '2';
+
+// Only the profile photo is stored: users/{uid}/avatar/avatar.{jpg|png|webp}, owner-only, small images only.
+service firebase.storage {
+  match /b/{bucket}/o {
+    match /users/{uid}/avatar/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+
+      allow create, update: if request.auth != null && request.auth.uid == uid
+        && fileName.matches('^avatar\\.(jpg|png|webp)$')
+        && request.resource.size > 0
+        && request.resource.size < 2 * 1024 * 1024
+        && request.resource.contentType.matches('^image/(jpeg|png|webp)$');
+
+      allow delete: if request.auth != null && request.auth.uid == uid;
+    }
+
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -58,7 +58,7 @@ jobs:
           java-version: "21"
       - uses: actions/setup-node@v7
         with:
-          node-version: "22"
+          node-version: "24"
       - name: Install rules test dependencies
         working-directory: backend/rules-tests
         run: npm install --no-audit --no-fund

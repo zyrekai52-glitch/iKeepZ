@@ -1,0 +1,194 @@
+rules_version = '2';
+
+// iKeepZ Firestore rules. See docs/ARCHITECTURE.md sections 3 and 7.
+//
+//  * Default deny. Every path not listed below is closed to clients.
+//  * Money (wallets, ledger, wallet transactions, payout destinations) is READ-ONLY for clients. Only the Cloud
+//    Functions backend (Admin SDK, which bypasses these rules) can write it.
+//  * Personal data (records, categories, preferences) is owner-only, with strict field, type and size validation.
+//  * Server-only collections (PIN hashes, payout secrets, idempotency keys, rate limits, audit trail ...) are closed.
+//
+// The icon, accent, theme and locale lists must stay identical to the Flutter client (lib/models); the CI job
+// "rules" checks that with backend/rules-tests/parity.test.js.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ---------------------------------------------------------------- helpers
+    function signedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return signedIn() && request.auth.uid == uid;
+    }
+
+    function text(value, minLength, maxLength) {
+      return value is string && value.size() >= minLength && value.size() <= maxLength;
+    }
+
+    function isoCurrency(value) {
+      return value is string && value.matches('^[A-Z]{3}$');
+    }
+
+    function allKeys(data, keys) {
+      return data.keys().hasAll(keys) && data.keys().hasOnly(keys);
+    }
+
+    function categoryIcon(value) {
+      return value in [
+        'salary', 'business', 'gift', 'wallet', 'savings', 'investment',
+        'food', 'groceries', 'coffee', 'transport', 'travel', 'bills',
+        'home', 'shopping', 'health', 'fitness', 'education', 'entertainment',
+        'subscription', 'insurance', 'tax', 'kids', 'pets', 'other'
+      ];
+    }
+
+    // ------------------------------------------------------------ users/{uid}
+    function validNotificationPrefs(value) {
+      return value is map && allKeys(value, ['wallet']) && value.wallet is bool;
+    }
+
+    function validPreferences(p) {
+      return p is map
+        && allKeys(p, ['theme', 'accent', 'fontScale', 'locale', 'displayCurrency', 'autoLockMinutes', 'notifications'])
+        && p.theme in ['system', 'light', 'dark']
+        && p.accent in ['slate', 'sage', 'clay', 'moss', 'stone', 'dusk']
+        && p.fontScale in ['small', 'medium', 'large']
+        && p.locale in ['en_PH', 'en_US', 'en_GB', 'fil_PH']
+        && isoCurrency(p.displayCurrency)
+        && p.autoLockMinutes is int && p.autoLockMinutes >= 0 && p.autoLockMinutes <= 120
+        && validNotificationPrefs(p.notifications);
+    }
+
+    function validPhotoUrl(value) {
+      return value == null
+        || (value is string && value.size() <= 600 && value.matches('^https://firebasestorage\\.googleapis\\.com/.*'));
+    }
+
+    // The profile document is created by the backend (/bootstrap). The owner may change only these four fields.
+    match /users/{uid} {
+      allow read: if isOwner(uid);
+      allow create, delete: if false;
+      allow update: if isOwner(uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayName', 'photoUrl', 'preferences', 'updatedAt'])
+        && text(request.resource.data.displayName, 1, 60)
+        && validPhotoUrl(request.resource.data.photoUrl)
+        && validPreferences(request.resource.data.preferences)
+        && request.resource.data.updatedAt == request.time;
+
+      // ------------------------------------------------------------ records
+      function validRecord(d) {
+        return allKeys(d, ['kind', 'title', 'amountMinor', 'currency', 'categoryId', 'categoryName', 'date', 'notes', 'tags', 'createdAt', 'updatedAt'])
+          && d.kind in ['income', 'expense']
+          && text(d.title, 1, 120)
+          && d.amountMinor is int && d.amountMinor > 0 && d.amountMinor <= 10000000000000
+          && isoCurrency(d.currency)
+          && (d.categoryId == null || text(d.categoryId, 1, 64))
+          && text(d.categoryName, 0, 60)
+          && d.date is timestamp
+          && text(d.notes, 0, 1000)
+          && d.tags is list && d.tags.size() <= 10
+          && d.updatedAt == request.time;
+      }
+
+      match /records/{recordId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && validRecord(request.resource.data)
+          && request.resource.data.createdAt == request.time;
+        allow update: if isOwner(uid)
+          && validRecord(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(uid);
+      }
+
+      // --------------------------------------------------------- categories
+      function validCategory(d) {
+        return allKeys(d, ['name', 'kind', 'color', 'icon', 'archived', 'createdAt', 'updatedAt'])
+          && text(d.name, 1, 60)
+          && d.kind in ['income', 'expense', 'both']
+          && d.color is int && d.color >= 0 && d.color <= 4294967295
+          && categoryIcon(d.icon)
+          && d.archived is bool
+          && d.updatedAt == request.time;
+      }
+
+      match /categories/{categoryId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && validCategory(request.resource.data)
+          && request.resource.data.createdAt == request.time;
+        allow update: if isOwner(uid)
+          && validCategory(request.resource.data)
+          && request.resource.data.createdAt == resource.data.createdAt;
+        allow delete: if isOwner(uid);
+      }
+
+      // ----------------------------------------------------------- activity
+      // Append-only. The backend writes `source: 'server'` entries; the app may only add `source: 'client'` ones.
+      match /activity/{activityId} {
+        allow read: if isOwner(uid);
+        allow create: if isOwner(uid)
+          && allKeys(request.resource.data, ['type', 'summary', 'entityType', 'entityId', 'source', 'createdAt'])
+          && text(request.resource.data.type, 1, 40)
+          && text(request.resource.data.summary, 1, 200)
+          && (request.resource.data.entityType == null || text(request.resource.data.entityType, 1, 40))
+          && (request.resource.data.entityId == null || text(request.resource.data.entityId, 1, 64))
+          && request.resource.data.source == 'client'
+          && request.resource.data.createdAt == request.time;
+        allow update, delete: if false;
+      }
+
+      // ------------------------------------------------------ notifications
+      // Created by the backend only. The owner can mark one as read (readAt: null -> timestamp) or delete it.
+      match /notifications/{notificationId} {
+        allow read: if isOwner(uid);
+        allow create: if false;
+        allow update: if isOwner(uid)
+          && resource.data.readAt == null
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['readAt'])
+          && request.resource.data.readAt == request.time;
+        allow delete: if isOwner(uid);
+      }
+
+      // ------------------------------------------------------- destinations
+      // Saved payout destinations: masked values only; full account numbers live in the server-only destinationSecrets.
+      match /destinations/{destinationId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+    }
+
+    // ---------------------------------------------------------------- wallet
+    match /wallets/{uid} {
+      allow read: if isOwner(uid);
+      allow write: if false;
+
+      match /ledger/{entryId} {
+        allow read: if isOwner(uid);
+        allow write: if false;
+      }
+    }
+
+    // A wallet transaction is visible to everybody who took part in it (both sides of a transfer), nobody else.
+    // Queries must filter with where('participants', arrayContains: uid).
+    match /walletTx/{txId} {
+      allow read: if signedIn() && request.auth.uid in resource.data.participants;
+      allow write: if false;
+
+      match /events/{eventId} {
+        allow read: if signedIn()
+          && request.auth.uid in get(/databases/$(database)/documents/walletTx/$(txId)).data.participants;
+        allow write: if false;
+      }
+    }
+
+    // ------------------------------------------------------------ everything else
+    // walletSecurity, destinationSecrets, walletCodes, idempotency, rateLimits, walletDaily, providerEvents,
+    // platformRevenue, adminAudit and any path not listed above: closed to clients.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
